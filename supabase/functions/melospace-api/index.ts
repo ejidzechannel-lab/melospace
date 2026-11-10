@@ -190,11 +190,82 @@ async function handleCatalog(req) {
   } catch { return apiJson({ error: 'AUDIUS_UPSTREAM_UNAVAILABLE' }, 502); }
 }
 
+async function handleSocial(req) {
+ if(req.headers.get('Origin') && req.headers.get('Origin')!==WEB_ORIGIN)return apiJson({error:'ORIGIN_DENIED'},403);
+ if(req.method==='OPTIONS')return new Response(null,{status:204,headers:CORS});
+ if(req.method!=='POST')return apiJson({error:'METHOD_NOT_ALLOWED'},405);
+ let body;try{body=await req.json()}catch{return apiJson({error:'INVALID_JSON'},400)}
+ const userId=await authenticateInitData(body?.initData,Deno.env.get('TELEGRAM_BOT_TOKEN')?.trim());
+ const readable=['feed','comments','stream'].includes(body?.action);
+ if(!userId&&(!readable||body?.initData))return apiJson({error:'TELEGRAM_AUTH_REQUIRED'},401);
+ const user=userId?JSON.parse(new URLSearchParams(body.initData).get('user')):{};
+ const label=String(user.first_name||user.username||'Участник MeloSpace').trim().slice(0,60)||'Участник MeloSpace';
+ const db=createClient(Deno.env.get('SUPABASE_URL'),Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}});
+ const uuid=x=>typeof x==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x);
+ try{
+  if(body.action==='feed'){
+   if(body.postId&&!uuid(body.postId))return apiJson({error:'INVALID_POST'},400);
+   const offset=Number.isSafeInteger(body.offset)&&body.offset>=0?body.offset:0;
+   const r=await db.rpc('melo_social_feed',{viewer:userId,page_offset:offset,selected_post:body.postId||null});if(r.error)throw Error('db');
+   return apiJson({posts:r.data,hasMore:r.data.length===20});
+  }
+  if(body.action==='publish'){
+   if(!uuid(body.trackId)||body.rightsConfirmed!==true||typeof body.caption!=='string'||body.caption.trim().length>280)return apiJson({error:'PUBLICATION_CONFIRMATION_REQUIRED'},400);
+   const track=await db.from('music_tracks').select('id').eq('id',body.trackId).eq('telegram_user_id',userId).maybeSingle();if(track.error)throw Error('db');if(!track.data)return apiJson({error:'TRACK_NOT_FOUND'},404);
+   const old=await db.from('music_posts').select('id,status').eq('track_id',body.trackId).eq('telegram_user_id',userId).maybeSingle();if(old.error)throw Error('db');
+   if(old.data?.status==='hidden')return apiJson({error:'POST_MODERATED'},403);
+   const record={track_id:body.trackId,telegram_user_id:userId,author_label:label,caption:body.caption.trim(),rights_confirmed:true,status:'published'};
+   const result=old.data?await db.from('music_posts').update(record).eq('id',old.data.id).eq('telegram_user_id',userId).neq('status','hidden').select('id').single():await db.from('music_posts').insert(record).select('id').single();
+   if(result.error)throw Error('publish');return apiJson({postId:result.data.id});
+  }
+  if(!uuid(body.postId))return apiJson({error:'INVALID_POST'},400);
+  const p=await db.from('music_posts').select('id,track_id,telegram_user_id,status').eq('id',body.postId).maybeSingle();if(p.error)throw Error('db');
+  if(!p.data||p.data.status!=='published')return apiJson({error:'POST_NOT_FOUND'},404);
+  if(body.action==='withdraw'||body.action==='moderate'){
+   const admin=String(userId)===Deno.env.get('MELO_ADMIN_USER_ID');
+   if(body.action==='moderate'?!admin:p.data.telegram_user_id!==userId)return apiJson({error:'FORBIDDEN'},403);
+   const r=await db.from('music_posts').update({status:body.action==='moderate'?'hidden':'withdrawn'}).eq('id',body.postId);if(r.error)throw Error('db');return apiJson({ok:true});
+  }
+  if(body.action==='stream'){
+   const t=await db.from('music_tracks').select('storage_path').eq('id',p.data.track_id).maybeSingle();if(t.error||!t.data)throw Error('track');
+   const r=await db.storage.from(BUCKET).createSignedUrl(t.data.storage_path,300);if(r.error)throw Error('sign');return apiJson({url:r.data.signedUrl,expiresAt:Date.now()+270000});
+  }
+  if(body.action==='like'||body.action==='repost'){
+   if(typeof body.enabled!=='boolean')return apiJson({error:'INVALID_STATE'},400);
+   const table=body.action==='like'?'music_post_likes':'music_post_reposts';
+   const value={post_id:body.postId,telegram_user_id:userId,...(body.action==='repost'?{author_label:label}:{})};
+   const r=body.enabled?await db.from(table).upsert(value,{onConflict:'post_id,telegram_user_id',ignoreDuplicates:true}):await db.from(table).delete().eq('post_id',body.postId).eq('telegram_user_id',userId);
+   if(r.error)throw Error('db');return apiJson({ok:true});
+  }
+  if(body.action==='comments'){
+   const offset=Number.isSafeInteger(body.offset)&&body.offset>=0?Math.min(body.offset,10000):0;
+   const r=await db.from('music_post_comments').select('id,author_label,body,created_at,telegram_user_id').eq('post_id',body.postId).eq('deleted',false).order('created_at',{ascending:false}).order('id').range(offset,offset+19);
+   if(r.error)throw Error('db');return apiJson({comments:r.data.map(({telegram_user_id,...c})=>({...c,mine:telegram_user_id===userId})),hasMore:r.data.length===20});
+  }
+  if(body.action==='comment'){
+   const text=typeof body.text==='string'?body.text.trim():'';if(!text||text.length>500)return apiJson({error:'INVALID_COMMENT'},400);
+   const recent=await db.from('music_post_comments').select('id').eq('telegram_user_id',userId).gte('created_at',new Date(Date.now()-10000).toISOString()).limit(1);
+   if(recent.error)throw Error('db');if(recent.data.length)return apiJson({error:'COMMENT_TOO_FAST'},429);
+   const r=await db.from('music_post_comments').insert({post_id:body.postId,telegram_user_id:userId,author_label:label,body:text});if(r.error)throw Error('db');return apiJson({ok:true});
+  }
+  if(body.action==='comment_delete'){
+   if(!uuid(body.commentId))return apiJson({error:'INVALID_COMMENT'},400);
+   const r=await db.from('music_post_comments').update({deleted:true}).eq('id',body.commentId).eq('post_id',body.postId).eq('telegram_user_id',userId).select('id');if(r.error)throw Error('db');if(!r.data.length)return apiJson({error:'FORBIDDEN'},403);return apiJson({ok:true});
+  }
+  if(body.action==='report'){
+   const text=typeof body.reason==='string'?body.reason.trim():'';if(!text||text.length>500)return apiJson({error:'INVALID_REPORT'},400);
+   const r=await db.from('music_post_reports').upsert({post_id:body.postId,telegram_user_id:userId,reason:text},{onConflict:'post_id,telegram_user_id'});if(r.error)throw Error('db');return apiJson({ok:true});
+  }
+  return apiJson({error:'UNKNOWN_ACTION'},400);
+ }catch{console.error('MeloSpace social operation failed');return apiJson({error:'SOCIAL_UNAVAILABLE'},503)}
+}
+
 async function handleRequest(req) {
+  if (new URL(req.url).pathname.endsWith("/social")) return handleSocial(req);
   if (new URL(req.url).pathname.endsWith("/catalog")) return handleCatalog(req);
   if (new URL(req.url).pathname.endsWith("/library")) return handleLibrary(req);
   if (req.method === 'GET') {
-    return Response.json({ service: 'MeloSpace', status: 'ok', version: 6 });
+    return Response.json({ service: 'MeloSpace', status: 'ok', version: 7 });
   }
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
