@@ -3,6 +3,31 @@ const $=s=>document.querySelector(s), audio=$('#audio');
 let db, tracks=[],playlists=[],current=null,queue=[],view='home',shuffled=false,repeated=false,toastTimer;
 const CLOUD_API='https://jpqvcbchqqygwhpgwoyi.supabase.co/functions/v1/melospace-api/library';
 let cloudBusy=false,cloudStatus='';
+let cloudReady=false,cloudWrites=0;
+async function collections(){const p=[],m=[];let offset=0;while(true){const data=await cloudCall('collections',{offset});if(!Array.isArray(data.playlists)||!Array.isArray(data.memberships))throw new Error('UPDATE_BACKEND');p.push(...data.playlists);m.push(...data.memberships);if(!data.hasMore)break;offset+=100}return{playlists:p,memberships:m}}
+async function setMembership(t,id,add){
+  if(t.saving||cloudBusy)return;
+  if(!t.cloud){const old=[...t.playlists];t.playlists=add?[...t.playlists,id]:t.playlists.filter(x=>x!==id);try{await saveTrack(t)}catch{t.playlists=old;toast('Не удалось сохранить плейлист')}render();return}
+  if(!cloudReady){toast('Сначала обнови серверную медиатеку');return}
+  t.saving=true;cloudWrites++;try{await cloudCall('membership',{trackId:t.serverId,playlistId:id,add});t.playlists=add?[...new Set([...t.playlists,id])]:t.playlists.filter(x=>x!==id);toast('Плейлист синхронизирован')}catch{toast('Не удалось сохранить. Проверь подключение и попробуй снова.')}finally{t.saving=false;cloudWrites--;render()}
+}
+async function migrateCollections(){
+ if(!cloudReady||cloudBusy||cloudWrites)return;
+ cloudWrites++;$('#cloudImport').disabled=true;let success=false;
+ try{
+  const mapping=new Map();
+  for(const p of playlists.filter(p=>!p.cloud)){const result=await cloudCall('playlist_create',{name:p.name,clientKey:'legacy:'+p.id});mapping.set(p.id,result.playlist.id)}
+  for(const t of tracks.filter(t=>t.cloud)){
+   const prefs=cloudPreferences(t);
+   if(prefs.favorite)await cloudCall('favorite',{trackId:t.serverId,favorite:true});
+   for(const id of Array.isArray(prefs.playlists)?prefs.playlists:[]){if(mapping.has(id))await cloudCall('membership',{trackId:t.serverId,playlistId:mapping.get(id),add:true})}
+  }
+  // Clear legacy cloud preferences only after the entire import succeeds.
+  for(const t of tracks.filter(t=>t.cloud)){try{localStorage.removeItem(preferenceKey(t))}catch{}}
+  success=true;toast('Коллекции с устройства перенесены на сервер');
+ }catch{toast('Перенос не завершён. Данные на устройстве сохранены — можно повторить.')}finally{cloudWrites--;$('#cloudImport').disabled=false;if(success)await loadCloud()}
+}
+
 function cloudNote(text){cloudStatus=text;const el=$('#cloudStatus');if(el)el.textContent=text}
 function preferenceKey(t){return `melospace-cloud:${window.Telegram?.WebApp?.initDataUnsafe?.user?.id||'unknown'}:${t.serverId}`}
 function cloudPreferences(t){try{return JSON.parse(localStorage.getItem(preferenceKey(t))||'{}')}catch{return {}}}
@@ -15,19 +40,23 @@ async function cloudCall(action,extra={}){
   return data;
 }
 async function loadCloud(){
-  if(cloudBusy)return;
+  if(cloudBusy||cloudWrites)return;
   if(!window.Telegram?.WebApp?.initData){cloudNote('Серверная музыка доступна при запуске через кнопку бота в Telegram.');return}
   cloudBusy=true;$('#cloudRefresh').disabled=true;cloudNote('Загружаем музыку из бота…');
   try{
     const rows=[];let offset=0;
     while(true){const data=await cloudCall('list',{offset});if(!Array.isArray(data.tracks))throw new Error('UPDATE_BACKEND');rows.push(...data.tracks);if(!data.hasMore)break;offset+=data.tracks.length;if(!data.tracks.length)break}
+    const groups=await collections();
     const old=new Map(tracks.filter(t=>t.cloud).map(t=>[t.id,t]));
-    const remote=rows.map(row=>{const id='cloud:'+row.id;const previous=old.get(id);const t={id,serverId:row.id,cloud:true,title:row.title,artist:row.artist,url:previous?.url||'',expiresAt:previous?.expiresAt||0};const prefs=cloudPreferences(t);return {...t,favorite:!!prefs.favorite,playlists:Array.isArray(prefs.playlists)?prefs.playlists:[]}});
+    const remote=rows.map(row=>{const id='cloud:'+row.id;const previous=old.get(id);const t={id,serverId:row.id,cloud:true,title:row.title,artist:row.artist,url:previous?.url||'',expiresAt:previous?.expiresAt||0};return {...t,favorite:!!row.favorite,playlists:groups.memberships.filter(m=>m.track_id===row.id).map(m=>m.playlist_id)}});
     tracks=[...tracks.filter(t=>!t.cloud),...remote];
+    playlists=[...playlists.filter(p=>!p.cloud),...groups.playlists.map(p=>({...p,cloud:true}))];cloudReady=true;
+    $('#cloudImport').hidden=!playlists.some(p=>!p.cloud)&&!remote.some(t=>{const prefs=cloudPreferences(t);return prefs.favorite||prefs.playlists?.length});
     queue=queue.filter(id=>tracks.some(t=>t.id===id));
-    cloudNote(`Из бота: ${remote.length} треков. Отправь аудио в чат бота и нажми «Обновить». Избранное и плейлисты пока сохраняются на устройстве.`);render();
+    cloudNote(`Из бота: ${remote.length} треков. Отправь аудио в чат бота и нажми «Обновить». Избранное и серверные плейлисты синхронизируются. На другом устройстве нажми «Обновить».`);render();
   }catch(error){
-    const text=error.message==='TELEGRAM_AUTH_REQUIRED'?'Сессия Telegram истекла. Закрой Mini App и открой заново через бота.':error.message==='UPDATE_BACKEND'?'Нужно обновить функцию melospace-api до версии 4.':'Не удалось загрузить музыку из бота. Проверь подключение и обновление серверной функции.';
+    cloudReady=false;
+    const text=error.message==='TELEGRAM_AUTH_REQUIRED'?'Сессия Telegram истекла. Закрой Mini App и открой заново через бота.':error.message==='UPDATE_BACKEND'?'Нужно обновить функцию melospace-api до версии 5.':'Не удалось загрузить музыку из бота. Проверь подключение и обновление серверной функции.';
     cloudNote(text);
   }finally{cloudBusy=false;$('#cloudRefresh').disabled=false}
 }
@@ -42,9 +71,14 @@ async function init(){try{const open=indexedDB.open('melospace-v2',1);open.onupg
 function visible(){const q=$('#search').value.trim().toLowerCase(),filter=$('#filter').value;return tracks.filter(t=>(view!=='favorites'||t.favorite)&&(filter==='all'||t.playlists.includes(filter))&&`${t.title} ${t.artist}`.toLowerCase().includes(q))}
 function element(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e}
 function button(label,title,action,cls=''){const b=element('button',cls,label);b.type='button';b.title=title;b.setAttribute('aria-label',title);b.onclick=action;return b}
-function render(){const selected=$('#filter').value;$('#filter').replaceChildren(new Option('Все треки','all'),...playlists.map(p=>new Option(p.name,p.id)));$('#filter').value=playlists.some(p=>p.id===selected)?selected:'all';$('#tracks').replaceChildren();visible().forEach(t=>{const row=element('div',`track${current===t.id?' active':''}`);const cover=button(current===t.id&&!audio.paused?'Ⅱ':'▶','Воспроизвести '+t.title,()=>play(t.id),'cover');const info=button('','Воспроизвести '+t.title,()=>play(t.id),'track-info');info.append(element('b','track-title',t.title),element('small','',t.artist));const fav=button(t.favorite?'♥':'♡','Добавить или убрать из избранного',()=>favorite(t),t.favorite?'liked':'');const add=element('select');add.setAttribute('aria-label','Добавить в плейлист: '+t.title);add.append(new Option('＋ Плейлист',''),...playlists.map(p=>new Option((t.playlists.includes(p.id)?'✓ ':'')+p.name,p.id)));add.onchange=async()=>{const id=add.value;if(!id)return;const previous=[...t.playlists];t.playlists=t.playlists.includes(id)?t.playlists.filter(x=>x!==id):[...t.playlists,id];try{await saveTrack(t);render();toast('Плейлист обновлён')}catch{t.playlists=previous;render();toast('Не удалось сохранить плейлист')}};row.append(cover,info,fav,add);if(!t.cloud)row.append(button('×','Удалить трек',()=>removeTrack(t)));else row.append(element('small','cloud-badge','☁'));$('#tracks').append(row)});const isEmpty=visible().length===0;$('#empty').hidden=!isEmpty;$('#empty h3').textContent=tracks.length?'Здесь пока тихо':'Здесь начинается твоя музыка';$('#empty p').textContent=tracks.length?'Попробуй другой поиск или добавь треки в эту коллекцию.':'Добавь аудиофайлы — они сохранятся на этом устройстве.';$('#favCount').textContent=tracks.filter(t=>t.favorite).length+' треков';$('#totalCount').textContent=tracks.length+' треков';syncPlayer()}
-async function saveTrack(t){if(t.cloud){localStorage.setItem(preferenceKey(t),JSON.stringify({favorite:t.favorite,playlists:t.playlists}));return}const {url,...stored}=t;await write('tracks',stored)}
-async function favorite(t){const previous=t.favorite;t.favorite=!previous;try{await saveTrack(t);render()}catch{t.favorite=previous;render();toast('Не удалось сохранить избранное')}}
+function render(){const selected=$('#filter').value;$('#filter').replaceChildren(new Option('Все треки','all'),...playlists.map(p=>new Option(p.name,p.id)));$('#filter').value=playlists.some(p=>p.id===selected)?selected:'all';$('#tracks').replaceChildren();visible().forEach(t=>{const row=element('div',`track${current===t.id?' active':''}`);const cover=button(current===t.id&&!audio.paused?'Ⅱ':'▶','Воспроизвести '+t.title,()=>play(t.id),'cover');const info=button('','Воспроизвести '+t.title,()=>play(t.id),'track-info');info.append(element('b','track-title',t.title),element('small','',t.artist));const fav=button(t.favorite?'♥':'♡','Добавить или убрать из избранного',()=>favorite(t),t.favorite?'liked':'');const add=element('select');add.setAttribute('aria-label','Добавить в плейлист: '+t.title);add.append(new Option('＋ Плейлист',''),...playlists.filter(p=>!!p.cloud===!!t.cloud).map(p=>new Option((t.playlists.includes(p.id)?'✓ ':'')+p.name,p.id)));add.onchange=()=>{const id=add.value;if(id)setMembership(t,id,!t.playlists.includes(id))};row.append(cover,info,fav,add);if(!t.cloud)row.append(button('×','Удалить трек',()=>removeTrack(t)));else row.append(element('small','cloud-badge','☁'));$('#tracks').append(row)});const isEmpty=visible().length===0;$('#empty').hidden=!isEmpty;$('#empty h3').textContent=tracks.length?'Здесь пока тихо':'Здесь начинается твоя музыка';$('#empty p').textContent=tracks.length?'Попробуй другой поиск или добавь треки в эту коллекцию.':'Добавь аудиофайлы — они сохранятся на этом устройстве.';$('#favCount').textContent=tracks.filter(t=>t.favorite).length+' треков';$('#totalCount').textContent=tracks.length+' треков';syncPlayer()}
+async function saveTrack(t){if(t.cloud)throw new Error('USE_CLOUD_MUTATION');const {url,...stored}=t;await write('tracks',stored)}
+async function favorite(t){
+ if(t.saving||cloudBusy)return;
+ const value=!t.favorite;
+ if(t.cloud){if(!cloudReady){toast('Сначала обнови медиатеку');return}t.saving=true;cloudWrites++;try{await cloudCall('favorite',{trackId:t.serverId,favorite:value});t.favorite=value}catch{toast('Избранное не сохранено. Проверь подключение.')}finally{t.saving=false;cloudWrites--;render()}return}
+ const previous=t.favorite;t.favorite=value;try{await saveTrack(t)}catch{t.favorite=previous;toast('Не удалось сохранить избранное')}render();
+}
 async function removeTrack(t){try{await write('tracks',t.id,true);if(current===t.id){audio.pause();audio.removeAttribute('src');audio.load();current=null}URL.revokeObjectURL(t.url);tracks=tracks.filter(x=>x.id!==t.id);queue=queue.filter(id=>id!==t.id);render()}catch{toast('Не удалось удалить трек')}}
 async function play(id,newQueue){const t=tracks.find(x=>x.id===id);if(!t)return;if(newQueue)queue=[...newQueue];else if(!queue.includes(id))queue=visible().map(x=>x.id);if(current===id&&!audio.paused){audio.pause();return}const ticket=++playRequest;try{if(t.cloud)await cloudUrl(t);if(ticket!==playRequest)return;if(current!==id||audio.getAttribute('src')!==t.url){current=id;audio.src=t.url}await audio.play()}catch(e){toast('Не удалось воспроизвести файл. Попробуй MP3, M4A или WAV.')}render();if('mediaSession'in navigator){navigator.mediaSession.metadata=new MediaMetadata({title:t.title,artist:t.artist,album:'MeloSpace'})}}
 function syncPlayer(){const t=tracks.find(x=>x.id===current);$('#nowTitle').textContent=t?.title||'Твоя музыка ждёт';$('#nowArtist').textContent=t?.artist||'Добавь первый трек';$('#play').textContent=audio.paused?'▶':'Ⅱ';$('#play').setAttribute('aria-label',audio.paused?'Воспроизвести':'Пауза');$('#nowFav').textContent=t?.favorite?'♥':'♡';$('#nowFav').classList.toggle('liked',!!t?.favorite);$('#elapsed').textContent=fmt(audio.currentTime);$('#duration').textContent=fmt(audio.duration);$('#seek').value=Number.isFinite(audio.duration)&&audio.duration>0?audio.currentTime/audio.duration*1000:0}
@@ -70,12 +104,18 @@ async function importAudio(e){
   else if(added)toast(`Добавлено треков: ${added}${skipped?' · Пропущено неаудиофайлов: '+skipped:''}`);
   else toast('Аудиофайлы не найдены. Выбери MP3, M4A, WAV, OGG или FLAC в папке «Загрузки».');
 }
-$('#cloudRefresh').onclick=loadCloud;$('#botUpload').onclick=()=>{if(window.Telegram?.WebApp?.initData)window.Telegram.WebApp.openTelegramLink('https://t.me/MeloSpaceMusicBot');else window.open('https://t.me/MeloSpaceMusicBot','_blank','noopener')};
+$('#cloudImport').onclick=migrateCollections;$('#cloudRefresh').onclick=loadCloud;$('#botUpload').onclick=()=>{if(window.Telegram?.WebApp?.initData)window.Telegram.WebApp.openTelegramLink('https://t.me/MeloSpaceMusicBot');else window.open('https://t.me/MeloSpaceMusicBot','_blank','noopener')};
 document.querySelectorAll('[data-audio-input]').forEach(input=>input.addEventListener('change',importAudio));
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>navigate(b.dataset.view));$('#search').oninput=render;$('#filter').onchange=render;
 $('#play').onclick=()=>current?play(current):visible()[0]?play(visible()[0].id):toast('Сначала добавь музыку');$('#next').onclick=()=>step(1);$('#prev').onclick=()=>audio.currentTime>3?audio.currentTime=0:step(-1);$('#nowFav').onclick=()=>{const t=tracks.find(x=>x.id===current);if(t)favorite(t)};
 $('#shuffle').onclick=()=>{shuffled=!shuffled;$('#shuffle').classList.toggle('liked',shuffled);$('#shuffle').setAttribute('aria-pressed',String(shuffled))};$('#repeat').onclick=()=>{repeated=!repeated;$('#repeat').classList.toggle('liked',repeated);$('#repeat').setAttribute('aria-pressed',String(repeated))};$('#wave').onclick=()=>{if(!tracks.length){toast('Добавь треки, чтобы запустить свою волну');$('#files').click();return}shuffled=true;$('#shuffle').classList.add('liked');$('#shuffle').setAttribute('aria-pressed','true');play(tracks[Math.floor(Math.random()*tracks.length)].id,tracks.map(t=>t.id))};
 audio.volume=.8;$('#volume').oninput=e=>audio.volume=Number(e.target.value);$('#seek').oninput=e=>{if(Number.isFinite(audio.duration))audio.currentTime=audio.duration*Number(e.target.value)/1000};audio.ontimeupdate=syncPlayer;audio.onloadedmetadata=syncPlayer;audio.onplay=render;audio.onpause=render;audio.onended=()=>{if(repeated){audio.currentTime=0;audio.play().catch(()=>toast('Нажми воспроизведение, чтобы продолжить'))}else step(1)};audio.onerror=()=>toast('Этот аудиофайл не поддерживается или повреждён.');
-function openPlaylist(){$('#playlistDialog').showModal();$('#playlistName').focus()}$('#playlistNew').onclick=openPlaylist;$('#newPlaylist').onclick=openPlaylist;$('#playlistForm').onsubmit=async e=>{e.preventDefault();const name=$('#playlistName').value.trim();if(!name)return;const p={id:newId(),name};try{await write('playlists',p);playlists.push(p);$('#playlistName').value='';$('#playlistDialog').close();render();toast('Плейлист создан. Добавляй треки через меню в списке.')}catch{toast('Не удалось сохранить плейлист')}};
+function openPlaylist(){$('#playlistDialog').showModal();$('#playlistName').focus()}$('#playlistNew').onclick=openPlaylist;$('#newPlaylist').onclick=openPlaylist;$('#playlistForm').onsubmit=async e=>{e.preventDefault();const name=$('#playlistName').value.trim();if(!name||cloudBusy||cloudWrites)return;
+ const useCloud=!!window.Telegram?.WebApp?.initData;
+ if(useCloud&&!cloudReady){toast('Дождись загрузки медиатеки. Проверь обновление серверной функции.');return}
+ const p={id:newId(),name};cloudWrites++;
+ try{if(useCloud){const result=await cloudCall('playlist_create',{name,clientKey:p.id});playlists.push({...result.playlist,cloud:true})}else{await write('playlists',p);playlists.push(p)}$('#playlistName').value='';$('#playlistDialog').close();render();toast(useCloud?'Плейлист сохранён на сервере':'Плейлист сохранён на устройстве')}
+ catch{toast('Не удалось сохранить плейлист')}finally{cloudWrites--}};
+
 function showQueue(){$('#queueList').replaceChildren();const ids=queue.length?queue:tracks.map(t=>t.id);if(!ids.length)$('#queueList').append(element('p','','Добавь музыку — здесь появится очередь.'));ids.forEach(id=>{const t=tracks.find(x=>x.id===id);if(!t)return;const b=button((id===current?'▶ ':'')+t.artist+' — '+t.title,'Воспроизвести '+t.title,()=>{play(id);$('#queueDialog').close()},'track');$('#queueList').append(b)});$('#queueDialog').showModal()}$('#queueBtn').onclick=showQueue;$('#nowCover').onclick=showQueue;document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>document.getElementById(b.dataset.close).close());
 const tg=window.Telegram?.WebApp;if(tg?.initData){try{tg.ready();tg.expand();tg.setHeaderColor('#101014');tg.setBackgroundColor('#101014')}catch{}}if('mediaSession'in navigator){for(const [action,handler]of Object.entries({play:()=>audio.play().catch(()=>{}),pause:()=>audio.pause(),previoustrack:()=>step(-1),nexttrack:()=>step(1)})){try{navigator.mediaSession.setActionHandler(action,handler)}catch{}}}render();init();
