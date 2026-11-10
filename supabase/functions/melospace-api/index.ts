@@ -165,10 +165,36 @@ async function handleLibrary(req) {
   }
 }
 
+async function handleCatalog(req) {
+  if (req.headers.get('Origin') && req.headers.get('Origin') !== WEB_ORIGIN) return apiJson({ error: 'ORIGIN_DENIED' }, 403);
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+  if (req.method !== 'POST') return apiJson({ error: 'METHOD_NOT_ALLOWED' }, 405);
+  let body;
+  try { body = await req.json(); } catch { return apiJson({ error: 'INVALID_JSON' }, 400); }
+  const path = body?.path;
+  if (typeof path !== 'string' || !/^\/tracks\/(trending|search|[A-Za-z0-9]{1,32})$/.test(path)) return apiJson({ error: 'INVALID_PATH' }, 400);
+  const params = body.params || {};
+  const query = typeof params.query === 'string' ? params.query.trim().slice(0, 200) : '';
+  const offset = Number.isSafeInteger(params.offset) && params.offset >= 0 ? Math.min(params.offset, 10000) : 0;
+  const genres = ['Electronic','Hip-Hop/Rap','Pop','Rock','Ambient','House','Techno','Dubstep','Jazz','Classical'];
+  const url = new URL('https://api.audius.co/v1' + path);
+  url.searchParams.set('app_name', 'MeloSpace');url.searchParams.set('limit', '30');url.searchParams.set('offset', String(offset));
+  if (query) url.searchParams.set('query', query);
+  if (genres.includes(params.genre)) url.searchParams.set('genre', params.genre);
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) return apiJson({ error: response.status === 429 ? 'RATE_LIMIT' : 'AUDIUS_UPSTREAM_ERROR' }, response.status === 429 ? 429 : 502);
+    const data = await response.json();
+    if (!data || !('data' in data)) return apiJson({ error: 'AUDIUS_INVALID_RESPONSE' }, 502);
+    return apiJson({ data: data.data });
+  } catch { return apiJson({ error: 'AUDIUS_UPSTREAM_UNAVAILABLE' }, 502); }
+}
+
 async function handleRequest(req) {
+  if (new URL(req.url).pathname.endsWith("/catalog")) return handleCatalog(req);
   if (new URL(req.url).pathname.endsWith("/library")) return handleLibrary(req);
   if (req.method === 'GET') {
-    return Response.json({ service: 'MeloSpace', status: 'ok', version: 5 });
+    return Response.json({ service: 'MeloSpace', status: 'ok', version: 6 });
   }
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
