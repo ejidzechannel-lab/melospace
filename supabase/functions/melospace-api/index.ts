@@ -36,9 +36,95 @@ async function readAudio(response) {
   return new Blob(chunks);
 }
 
+const WEB_ORIGIN = 'https://ejidzechannel-lab.github.io';
+const CORS = {
+  'Access-Control-Allow-Origin': WEB_ORIGIN,
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Vary': 'Origin',
+  'Cache-Control': 'no-store',
+};
+function apiJson(body, status = 200) {
+  return Response.json(body, { status, headers: CORS });
+}
+async function authenticateInitData(raw, token) {
+  if (typeof raw !== 'string' || raw.length > 16384 || !token) return null;
+  const params = new URLSearchParams(raw);
+  const hash = params.get('hash');
+  if (!hash || !/^[a-f0-9]{64}$/i.test(hash)) return null;
+  const seen = new Set();
+  for (const [key] of params) {
+    if (seen.has(key)) return null;
+    seen.add(key);
+  }
+  params.delete('hash');
+  const data = [...params.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([key, value]) => `${key}=${value}`).join('\n');
+  const encoder = new TextEncoder();
+  async function hmac(key, message) {
+    const imported = await crypto.subtle.importKey('raw', key,
+      { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return new Uint8Array(await crypto.subtle.sign('HMAC', imported, encoder.encode(message)));
+  }
+  const key = await hmac(encoder.encode('WebAppData'), token);
+  const expected = await hmac(key, data);
+  const supplied = Uint8Array.from(hash.match(/../g), byte => parseInt(byte, 16));
+  let difference = 0;
+  for (let i = 0; i < expected.length; i++) difference |= expected[i] ^ supplied[i];
+  if (difference) return null;
+  const authDate = Number(params.get('auth_date'));
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(authDate) || authDate > now + 30 || now - authDate > 86400) return null;
+  try {
+    const user = JSON.parse(params.get('user') || 'null');
+    return Number.isSafeInteger(user?.id) && user.id > 0 ? user.id : null;
+  } catch { return null; }
+}
+async function handleLibrary(req) {
+  if (req.headers.get('Origin') && req.headers.get('Origin') !== WEB_ORIGIN) {
+    return apiJson({ error: 'ORIGIN_DENIED' }, 403);
+  }
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+  if (req.method !== 'POST') return apiJson({ error: 'METHOD_NOT_ALLOWED' }, 405);
+  let body;
+  try { body = await req.json(); } catch { return apiJson({ error: 'INVALID_JSON' }, 400); }
+  const token = Deno.env.get('TELEGRAM_BOT_TOKEN')?.trim();
+  const userId = await authenticateInitData(body?.initData, token);
+  if (!userId) return apiJson({ error: 'TELEGRAM_AUTH_REQUIRED' }, 401);
+  const url = Deno.env.get('SUPABASE_URL');
+  const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!url || !key) return apiJson({ error: 'SERVER_NOT_CONFIGURED' }, 503);
+  const db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+  try {
+    if (body.action === 'list') {
+      const offset = Number.isSafeInteger(body.offset) && body.offset >= 0 ? body.offset : 0;
+      const { data, error } = await db.from('music_tracks')
+        .select('id,title,artist,duration_seconds,created_at')
+        .eq('telegram_user_id', userId).order('created_at', { ascending: false })
+        .order('id', { ascending: false }).range(offset, offset + 99);
+      if (error) throw new Error('list');
+      return apiJson({ tracks: data, hasMore: data.length === 100 });
+    }
+    if (body.action === 'stream' && typeof body.trackId === 'string') {
+      const { data, error } = await db.from('music_tracks').select('storage_path')
+        .eq('telegram_user_id', userId).eq('id', body.trackId).maybeSingle();
+      if (error) throw new Error('lookup');
+      if (!data) return apiJson({ error: 'TRACK_NOT_FOUND' }, 404);
+      const signed = await db.storage.from(BUCKET).createSignedUrl(data.storage_path, 3600);
+      if (signed.error || !signed.data?.signedUrl) throw new Error('sign');
+      return apiJson({ url: signed.data.signedUrl, expiresAt: Date.now() + 3500000 });
+    }
+    return apiJson({ error: 'UNKNOWN_ACTION' }, 400);
+  } catch {
+    console.error('MeloSpace library operation failed');
+    return apiJson({ error: 'LIBRARY_UNAVAILABLE' }, 503);
+  }
+}
+
 async function handleRequest(req) {
+  if (new URL(req.url).pathname.endsWith("/library")) return handleLibrary(req);
   if (req.method === 'GET') {
-    return Response.json({ service: 'MeloSpace', status: 'ok', version: 3 });
+    return Response.json({ service: 'MeloSpace', status: 'ok', version: 4 });
   }
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
@@ -77,7 +163,7 @@ async function handleRequest(req) {
     return reply(chatId, 'Файл больше 20 МБ. Для этой версии выбери файл поменьше.');
   }
 
-  const token = Deno.env.get('TELEGRAM_BOT_TOKEN');
+  const token = Deno.env.get('TELEGRAM_BOT_TOKEN')?.trim();
   const url = Deno.env.get('SUPABASE_URL');
   const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
   if (!token || !url || !key) {
@@ -147,7 +233,7 @@ async function handleRequest(req) {
       throw new Error('database');
     }
     uploadedPath = null;
-    return reply(chatId, `Сохранено: ${title} ✓\nФайл добавлен в серверную медиатеку. Её отображение в Mini App подключим следующим шагом.`);
+    return reply(chatId, `Сохранено: ${title} ✓\nФайл добавлен в серверную медиатеку. Открой MeloSpace и нажми «Обновить» в медиатеке.`);
   } catch (error) {
     // Never log exception objects: network errors can include the bot token in a URL.
     if (uploadedPath) {
