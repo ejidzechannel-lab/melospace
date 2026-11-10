@@ -96,10 +96,54 @@ async function handleLibrary(req) {
   if (!url || !key) return apiJson({ error: 'SERVER_NOT_CONFIGURED' }, 503);
   const db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
   try {
+    if (body.action === 'collections') {
+      const offset = Number.isSafeInteger(body.offset) && body.offset >= 0 ? body.offset : 0;
+      const p = await db.from('music_playlists').select('id,name').eq('telegram_user_id', userId)
+        .order('created_at').order('id').range(offset, offset + 99);
+      const m = await db.from('music_playlist_tracks').select('playlist_id,track_id')
+        .eq('telegram_user_id', userId).order('playlist_id').order('track_id').range(offset, offset + 99);
+      if (p.error || m.error) throw new Error('collections');
+      return apiJson({ playlists: p.data, memberships: m.data, hasMore: p.data.length === 100 || m.data.length === 100 });
+    }
+    if (body.action === 'playlist_create') {
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name || name.length > 60 || typeof body.clientKey !== 'string' || body.clientKey.length > 120 || !body.clientKey) {
+        return apiJson({ error: 'INVALID_PLAYLIST' }, 400);
+      }
+      const result = await db.from('music_playlists').upsert({
+        telegram_user_id: userId, client_key: body.clientKey, name,
+      }, { onConflict: 'telegram_user_id,client_key' }).select('id,name').single();
+      if (result.error) throw new Error('playlist_create');
+      return apiJson({ playlist: result.data });
+    }
+    if (body.action === 'favorite' || body.action === 'membership') {
+      if (typeof body.trackId !== 'string' || !/^[0-9a-f-]{36}$/i.test(body.trackId)) return apiJson({ error: 'INVALID_TRACK' }, 400);
+      const track = await db.from('music_tracks').select('id').eq('telegram_user_id', userId).eq('id', body.trackId).maybeSingle();
+      if (track.error) throw new Error('track_lookup');
+      if (!track.data) return apiJson({ error: 'TRACK_NOT_FOUND' }, 404);
+      if (body.action === 'favorite') {
+        if (typeof body.favorite !== 'boolean') return apiJson({ error: 'INVALID_FAVORITE' }, 400);
+        const result = await db.from('music_tracks').update({ favorite: body.favorite }).eq('telegram_user_id', userId).eq('id', body.trackId);
+        if (result.error) throw new Error('favorite');
+        return apiJson({ ok: true });
+      }
+      if (typeof body.playlistId !== 'string' || !/^[0-9a-f-]{36}$/i.test(body.playlistId) || typeof body.add !== 'boolean') {
+        return apiJson({ error: 'INVALID_MEMBERSHIP' }, 400);
+      }
+      const playlist = await db.from('music_playlists').select('id').eq('telegram_user_id', userId).eq('id', body.playlistId).maybeSingle();
+      if (playlist.error) throw new Error('playlist_lookup');
+      if (!playlist.data) return apiJson({ error: 'PLAYLIST_NOT_FOUND' }, 404);
+      const result = body.add
+        ? await db.from('music_playlist_tracks').upsert({ telegram_user_id: userId, playlist_id: body.playlistId, track_id: body.trackId }, { onConflict: 'telegram_user_id,playlist_id,track_id' })
+        : await db.from('music_playlist_tracks').delete().eq('telegram_user_id', userId).eq('playlist_id', body.playlistId).eq('track_id', body.trackId);
+      if (result.error) throw new Error('membership');
+      return apiJson({ ok: true });
+    }
+
     if (body.action === 'list') {
       const offset = Number.isSafeInteger(body.offset) && body.offset >= 0 ? body.offset : 0;
       const { data, error } = await db.from('music_tracks')
-        .select('id,title,artist,duration_seconds,created_at')
+        .select('id,title,artist,favorite,duration_seconds,created_at')
         .eq('telegram_user_id', userId).order('created_at', { ascending: false })
         .order('id', { ascending: false }).range(offset, offset + 99);
       if (error) throw new Error('list');
@@ -124,7 +168,7 @@ async function handleLibrary(req) {
 async function handleRequest(req) {
   if (new URL(req.url).pathname.endsWith("/library")) return handleLibrary(req);
   if (req.method === 'GET') {
-    return Response.json({ service: 'MeloSpace', status: 'ok', version: 4 });
+    return Response.json({ service: 'MeloSpace', status: 'ok', version: 5 });
   }
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
