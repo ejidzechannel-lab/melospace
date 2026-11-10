@@ -67,9 +67,9 @@ let meloTimer, meloSpeechTimer, meloGreetingTimer;
 let transitionTimer=null;
 const reducedMotion=()=>window.matchMedia?.('(prefers-reduced-motion: reduce)').matches===true;
 function meloSay(text,reset=true){const bubble=$('#meloSpeech');if(bubble)bubble.textContent=text;clearTimeout(meloSpeechTimer);if(reset)meloSpeechTimer=setTimeout(()=>{if(bubble)bubble.textContent=audio.paused?'Я рядом. Выбирай, что послушаем.':'Хороший трек. Ты умеешь выбирать.'},4200)}
-function meloSwitch(direction=1){clearTimeout(meloTimer);document.body.classList.remove('melo-switching');void document.body.offsetWidth;document.body.classList.add('melo-switching');meloSay(direction<0?'Ещё раз? Возвращаю предыдущий.':'Следующий трек? Сейчас, лапку протяну.');meloTimer=setTimeout(()=>document.body.classList.remove('melo-switching'),reducedMotion()?250:920)}
+function meloSwitch(direction=1){clearTimeout(meloTimer);document.body.classList.remove('melo-switching');void document.body.offsetWidth;document.body.classList.add('melo-switching');window.MeloMotion?.play('switch');meloSay(direction<0?'Ещё раз? Возвращаю предыдущий.':'Следующий трек? Сейчас, лапку протяну.');meloTimer=setTimeout(()=>document.body.classList.remove('melo-switching'),reducedMotion()?250:1220)}
 function cancelMeloTransition(){if(transitionTimer!==null){clearTimeout(transitionTimer);transitionTimer=null}}
-function greetMelo(){clearTimeout(meloGreetingTimer);document.body.classList.remove('melo-greeting');void document.body.offsetWidth;document.body.classList.add('melo-greeting');meloSay('Я Melo. Музыку не ворую. Только сердечки ♡');meloGreetingTimer=setTimeout(()=>document.body.classList.remove('melo-greeting'),1150)}
+function greetMelo(){if(transitionTimer!==null)return;clearTimeout(meloGreetingTimer);document.body.classList.remove('melo-greeting');void document.body.offsetWidth;document.body.classList.remove('melo-switching');document.body.classList.add('melo-greeting');window.MeloMotion?.play('wave');meloSay('Я Melo. Музыку не ворую. Только сердечки ♡');meloGreetingTimer=setTimeout(()=>document.body.classList.remove('melo-greeting'),1620)}
 function demoMelo(){if(transitionTimer!==null)return;meloSwitch();$('#meloAnnouncement').textContent='Melo показывает, как нажимает кнопку следующего трека.'}
 $('#meetMelo').onclick=greetMelo;$('#demoMelo').onclick=demoMelo;
 function syncMelo(){document.body.classList.toggle('is-playing',!audio.paused)}
@@ -97,7 +97,7 @@ function performStep(delta){if(!tracks.length){toast('Сначала добав�
 function step(delta){
  if(!tracks.length){toast('Сначала добавь музыку');meloSay('Пришли музыку в бот, а дальше я помогу.');return}
  cancelMeloTransition();++playRequest;meloSwitch(delta);
- transitionTimer=setTimeout(()=>{transitionTimer=null;performStep(delta)},reducedMotion()?0:460);
+ transitionTimer=setTimeout(()=>{transitionTimer=null;performStep(delta)},reducedMotion()?0:600);
 }
 function navigate(next){view=next;$('#home').hidden=next!=='home';const titles={home:'Твоя музыка. Твой Melo.',search:'Найди свой звук.',library:'Твоя медиатека.',favorites:'Мне нравится.'};$('#heading').textContent=titles[next];$('#listHeading').textContent=next==='favorites'?'Любимые треки':next==='search'?'Результаты поиска':'Моя музыка';document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('selected',b.dataset.view===next));$('#filter').value='all';$('#search').value='';render();if(next==='search')$('#search').focus()}
 function newId(){return globalThis.crypto?.randomUUID?.()||`track-${Date.now()}-${Math.random().toString(36).slice(2)}`}
