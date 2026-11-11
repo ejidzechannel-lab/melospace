@@ -65,7 +65,19 @@
     function point(x,y){const qx=x/N,qy=y/M;const g=Math.exp(-(((qx-paw[0])/.15)**2+((qy-paw[1])/.18)**2)*1.9);const zone=Math.min(1,Math.max(0,(qx-.66)/.1))*Math.min(1,Math.max(0,(qy-.37)/.11))*Math.min(1,Math.max(0,(.94-qy)/.12));return[(qx+(target[0]-paw[0])*g*zone)*W,(qy+(target[1]-paw[1])*g*zone)*H]}
     for(let y=7;y<M;y++)for(let x=10;x<N;x++){const a=[x*W/N,y*H/M],b=[(x+1)*W/N,y*H/M],c=[x*W/N,(y+1)*H/M],d=[(x+1)*W/N,(y+1)*H/M];const aa=point(x,y),bb=point(x+1,y),cc=point(x,y+1),dd=point(x+1,y+1);triangle(v.lc,frames[index],[a,b,c],[aa,bb,cc],alpha);triangle(v.lc,frames[index],[b,d,c],[bb,dd,cc],alpha)}
   }
-  function cpuPaint(v,t){v.ctx.clearRect(0,0,360,480);v.ctx.drawImage(frames[0],0,0);v.lc.clearRect(0,0,360,480);v.lc.globalCompositeOperation='source-over';
+  // Keep the same independent head reaction on devices without WebGL.
+  function cpuHead(v,t){if(!['success','encourage','think','listen','celebrate'].includes(mode))return;
+    const env=Math.sin(Math.PI*t);let angle=0,dx=0,dy=0;
+    if(mode==='success'){dy=Math.sin(t*Math.PI*4)*.018*env;angle=Math.sin(t*Math.PI*2)*.035*env}
+    if(mode==='encourage'){angle=-.075*env;dy=.005*env}
+    if(mode==='think'){angle=.065*env;dx=.008*env}
+    if(mode==='listen')angle=Math.sin(t*Math.PI*2)*.045*env;
+    if(mode==='celebrate'){dy=Math.sin(t*Math.PI*6)*.02*env;angle=Math.sin(t*Math.PI*4)*.045*env}
+    const N=12,M=12,W=360,H=480;
+    function point(x,y){const qx=x/N,qy=y/M*.54,hx=qx-.55,hy=qy-.28,fade=1-ease(Math.max(0,Math.min(1,(qy-.39)/.12)));const w=Math.exp(-((hx/.36)**2+(hy/.24)**2)*1.8)*fade;return[(qx+((Math.cos(angle)*hx-Math.sin(angle)*hy)-hx+dx)*w)*W,(qy+((Math.sin(angle)*hx+Math.cos(angle)*hy)-hy+dy)*w)*H]}
+    for(let y=0;y<M;y++)for(let x=0;x<N;x++){const a=[x/N*W,y/M*.54*H],b=[(x+1)/N*W,y/M*.54*H],c=[x/N*W,(y+1)/M*.54*H],d=[(x+1)/N*W,(y+1)/M*.54*H];triangle(v.ctx,frames[0],[a,b,c],[point(x,y),point(x+1,y),point(x,y+1)],1);triangle(v.ctx,frames[0],[b,d,c],[point(x+1,y),point(x+1,y+1),point(x,y+1)],1)}
+  }
+  function cpuPaint(v,t){v.ctx.clearRect(0,0,360,480);v.ctx.drawImage(frames[0],0,0);cpuHead(v,t);v.lc.clearRect(0,0,360,480);v.lc.globalCompositeOperation='source-over';
     if(['wave','success','celebrate'].includes(mode)){const envelope=Math.sin(Math.PI*t);warp(v,0,[paws[0][0]+Math.sin(t*Math.PI*6)*.045*envelope,paws[0][1]-.075*envelope],1)}
     else if(mode==='switch'){const scaled=Math.min(t*.999999,0.999999)*4,a=Math.floor(scaled),b=(a+1)%4,k=ease(scaled-a);const target=[paws[a][0]*(1-k)+paws[b][0]*k,paws[a][1]*(1-k)+paws[b][1]*k];warp(v,a,target,1);warp(v,b,target,k)}
     v.lc.globalCompositeOperation='destination-in';v.lc.drawImage(v.mask,0,0);v.lc.globalCompositeOperation='source-over';v.ctx.drawImage(v.layer,0,0);
