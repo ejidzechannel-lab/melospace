@@ -269,7 +269,7 @@ const ENGLISH_PREMIUM=[
 {id:'travel-help',name:'Когда нужна помощь',tip:'Could you…? — вежливая просьба. I need… — мне нужно.',phrases:[['Could you help me?','Не могли бы вы мне помочь?','Could you…? — вежливая форма просьбы.'],['I am lost.','Я заблудился.','Lost — потерявшийся.'],['Could you speak more slowly?','Не могли бы вы говорить медленнее?','More slowly — медленнее.'],['Please write it down.','Запишите это, пожалуйста.','Write down — записать.'],['I need a doctor.','Мне нужен врач.','Doctor — врач.'],['Where is the nearest pharmacy?','Где ближайшая аптека?','Nearest — ближайший, pharmacy — аптека.']]}
 ];
 
-const ENGLISH_FREE_IDS=['hello','people','things','questions','family','food','routine','negative','city','shopping','now','plans'];
+const ENGLISH_FREE_IDS=['zero-hello','zero-yes','zero-world','zero-me','hello','people','things','questions','family','food','routine','negative','city','shopping','now','plans'];
 const ENGLISH_ALL_IDS=[...ENGLISH_FREE_IDS,...ENGLISH_PREMIUM.map(l=>l.id)];
 function englishDb(){return createClient(Deno.env.get('SUPABASE_URL'),Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})}
 async function englishTelegram(method,body){const token=Deno.env.get('TELEGRAM_BOT_TOKEN')?.trim();const response=await fetch(`https://api.telegram.org/bot${token}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(7000)});const data=await response.json();if(!response.ok||!data.ok)throw Error('TELEGRAM_ERROR');return data.result}
