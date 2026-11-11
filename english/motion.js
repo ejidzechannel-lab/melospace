@@ -8,20 +8,31 @@
     vec4 cell(float f,vec2 q){q=clamp(q,vec2(.006,.003),vec2(.994,.997));return texture2D(sheet,vec2((f+q.x)*.25,q.y));}
     vec2 deform(vec2 q,vec2 from,vec2 to){vec2 delta=to-from;float w=exp(-dot((q-to)/vec2(.15,.18),(q-to)/vec2(.15,.18))*1.9);float zone=smoothstep(.66,.76,q.x)*smoothstep(.37,.48,q.y)*(1.-smoothstep(.82,.94,q.y));return q-delta*w*zone;}
     void main(){
-      vec4 base=cell(0.,uv);vec4 color=base;
+      float t=clamp(progress,0.,1.);float env=sin(3.14159265*t);
+      vec2 q=uv;vec2 pivot=vec2(.55,.28);vec2 h=q-pivot;
+      float head=exp(-dot(h/vec2(.36,.24),h/vec2(.36,.24))*1.8)*(1.-smoothstep(.39,.51,q.y));
+      float angle=0.;vec2 offset=vec2(0.);
+      if(mode>2.5&&mode<3.5){offset.y=sin(t*12.56637)*.018*env;angle=sin(t*6.28318)*.035*env;}
+      if(mode>3.5&&mode<4.5){angle=sin(t*3.14159)*-.075;offset.y=.005*env;}
+      if(mode>4.5&&mode<5.5){angle=.065*env;offset.x=.008*env;}
+      if(mode>5.5&&mode<6.5){angle=sin(t*6.28318)*.045*env;}
+      if(mode>6.5){offset.y=sin(t*18.84956)*.02*env;angle=sin(t*12.56637)*.045*env;}
+      vec2 rotated=mat2(cos(angle),-sin(angle),sin(angle),cos(angle))*h+pivot;
+      q=mix(q,rotated+offset,head);
+      vec4 base=cell(0.,q);vec4 color=base;
       if(mode<1.5){
         float t=clamp(progress,0.,1.)*4.;float seg=min(floor(t),3.);float k=smoothstep(0.,1.,fract(t));
         float a=seg;float b=seg+1.;if(b>3.5)b=0.;
         vec2 target=mix(paw(a),paw(b),k);
-        vec4 first=cell(a,deform(uv,paw(a),target));vec4 second=cell(b,deform(uv,paw(b),target));
+        vec4 first=cell(a,deform(q,paw(a),target));vec4 second=cell(b,deform(q,paw(b),target));
         vec4 moving=mix(first,second,k);
         // Head, body and tail stay on the clean neutral frame throughout the movement.
         float area=smoothstep(.66,.77,uv.x)*smoothstep(.39,.48,uv.y)*(1.-smoothstep(.88,.97,uv.y));
         color=mix(base,moving,area);
-      }else{
+      }else if(mode<3.5||mode>6.5){
         float envelope=sin(3.14159265*clamp(progress,0.,1.));
         vec2 target=paw(0.)+vec2(sin(progress*18.84956)*.045*envelope,-.075*envelope);
-        color=cell(0.,deform(uv,paw(0.),target));
+        color=cell(0.,deform(q,paw(0.),target));
       }
       gl_FragColor=color;
     }`;
@@ -55,18 +66,25 @@
     for(let y=7;y<M;y++)for(let x=10;x<N;x++){const a=[x*W/N,y*H/M],b=[(x+1)*W/N,y*H/M],c=[x*W/N,(y+1)*H/M],d=[(x+1)*W/N,(y+1)*H/M];const aa=point(x,y),bb=point(x+1,y),cc=point(x,y+1),dd=point(x+1,y+1);triangle(v.lc,frames[index],[a,b,c],[aa,bb,cc],alpha);triangle(v.lc,frames[index],[b,d,c],[bb,dd,cc],alpha)}
   }
   function cpuPaint(v,t){v.ctx.clearRect(0,0,360,480);v.ctx.drawImage(frames[0],0,0);v.lc.clearRect(0,0,360,480);v.lc.globalCompositeOperation='source-over';
-    if(mode==='wave'){const envelope=Math.sin(Math.PI*t);warp(v,0,[paws[0][0]+Math.sin(t*Math.PI*6)*.045*envelope,paws[0][1]-.075*envelope],1)}
-    else{const scaled=Math.min(t*.999999,0.999999)*4,a=Math.floor(scaled),b=(a+1)%4,k=ease(scaled-a);const target=[paws[a][0]*(1-k)+paws[b][0]*k,paws[a][1]*(1-k)+paws[b][1]*k];warp(v,a,target,1);warp(v,b,target,k)}
+    if(['wave','success','celebrate'].includes(mode)){const envelope=Math.sin(Math.PI*t);warp(v,0,[paws[0][0]+Math.sin(t*Math.PI*6)*.045*envelope,paws[0][1]-.075*envelope],1)}
+    else if(mode==='switch'){const scaled=Math.min(t*.999999,0.999999)*4,a=Math.floor(scaled),b=(a+1)%4,k=ease(scaled-a);const target=[paws[a][0]*(1-k)+paws[b][0]*k,paws[a][1]*(1-k)+paws[b][1]*k];warp(v,a,target,1);warp(v,b,target,k)}
     v.lc.globalCompositeOperation='destination-in';v.lc.drawImage(v.mask,0,0);v.lc.globalCompositeOperation='source-over';v.ctx.drawImage(v.layer,0,0);
   }
 
-  function paint(t){for(const v of views){if(!v.el.getClientRects().length)continue;if(v.cpu){cpuPaint(v,t);continue}v.gl.useProgram(v.program);v.gl.uniform1f(v.progress,t);v.gl.uniform1f(v.kind,mode==='wave'?2:1);v.gl.drawArrays(v.gl.TRIANGLES,0,6)}}
-  function finish(){cancelAnimationFrame(raf);raf=0;for(const v of views)v.el.classList.remove('has-motion');}
-  function tick(now){const t=Math.min(1,(now-start)/duration);paint(t);if(t<1)raf=requestAnimationFrame(tick);else finish()}
+  function paint(t){for(const v of views){if(!v.el.getClientRects().length)continue;if(v.cpu){cpuPaint(v,t);continue}v.gl.useProgram(v.program);v.gl.uniform1f(v.progress,t);v.gl.uniform1f(v.kind,({switch:1,wave:2,success:3,encourage:4,think:5,listen:6,celebrate:7}[mode]||2));v.gl.drawArrays(v.gl.TRIANGLES,0,6)}}
+  let cleanup=0;
+  const kinds=['wave','success','encourage','think','listen','celebrate'];
+  function finish(){cancelAnimationFrame(raf);clearTimeout(cleanup);raf=0;document.querySelectorAll('.raccoon').forEach(el=>{el.classList.remove('has-motion',...kinds.map(k=>'melo-'+k));el.querySelectorAll('.melo-particle').forEach(p=>p.remove())});}
+  function decorate(kind){for(const el of document.querySelectorAll('.raccoon')){if(!el.getClientRects().length)continue;el.classList.add('melo-'+kind);if(kind==='success'||kind==='celebrate'||kind==='wave'){const count=kind==='celebrate'?12:5;for(let i=0;i<count;i++){const p=document.createElement('i');p.className='melo-particle';p.textContent=i%3?'✦':'✧';p.style.setProperty('--px',((i%2?-1:1)*(20+i*5))+'px');p.style.setProperty('--py',(-25-i*7)+'px');p.style.setProperty('--delay',(i*35)+'ms');p.style.left=(38+(i%4)*9)+'%';p.style.top=(40+(i%3)*8)+'%';el.append(p)}}}}
+
+  function tick(now){const t=Math.min(1,(now-start)/duration);paint(t);if(t<1)raf=requestAnimationFrame(tick);else{for(const v of views)v.el.classList.remove('has-motion');raf=0}}
   function play(kind){
-    finish();mode=kind;
-    if(!ready||window.matchMedia('(prefers-reduced-motion: reduce)').matches)return;
-    duration=kind==='wave'?1600:1200;start=performance.now();for(const v of views)v.el.classList.add('has-motion');paint(0);raf=requestAnimationFrame(tick);
+    finish();mode=kinds.includes(kind)?kind:'switch';
+    if(document.hidden||window.matchMedia('(prefers-reduced-motion: reduce)').matches)return;
+    duration=({wave:1900,success:1500,encourage:1800,think:1600,listen:2000,celebrate:2600}[mode]||1200);
+    decorate(mode);cleanup=setTimeout(finish,duration+550);
+    if(!ready)return;
+    start=performance.now();for(const v of views)if(v.el.getClientRects().length)v.el.classList.add('has-motion');paint(0);raf=requestAnimationFrame(tick);
   }
   window.MeloMotion={play,stop:finish};
   image=new Image();image.onload=()=>{for(let i=0;i<4;i++){const f=document.createElement('canvas');f.width=360;f.height=480;f.getContext('2d').drawImage(image,i*image.width/4,0,image.width/4,image.height,0,0,360,480);frames.push(f)}document.querySelectorAll('.raccoon').forEach(el=>{try{const v=makeView(el)||cpuView(el);if(v)views.push(v)}catch{const v=cpuView(el);if(v)views.push(v)}});ready=views.length>0};image.src='../assets/melo-3d.webp';
