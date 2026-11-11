@@ -260,12 +260,80 @@ async function handleSocial(req) {
  }catch{console.error('MeloSpace social operation failed');return apiJson({error:'SOCIAL_UNAVAILABLE'},503)}
 }
 
+const ENGLISH_PREMIUM=[
+{id:'travel-airport',name:'В аэропорту',tip:'Boarding pass — посадочный талон. Gate — выход на посадку. I would like… — вежливая просьба.',phrases:[['Where is the check-in desk?','Где стойка регистрации?','Check-in desk — стойка регистрации.'],['Here is my passport.','Вот мой паспорт.','Here is… — «Вот…».'],['I have one bag.','У меня одна сумка.','One bag — одна сумка.'],['Where is gate twelve?','Где двенадцатый выход на посадку?','Gate — выход на посадку, twelve — двенадцать.'],['What time is boarding?','Во сколько посадка?','What time…? — «В какое время…?».'],['My flight is delayed.','Мой рейс задерживается.','Delayed — задержан.']]},
+{id:'travel-hotel',name:'Заселяемся в отель',tip:'I have a reservation — у меня есть бронь. Could I…? — вежливая просьба.',phrases:[['I have a reservation.','У меня есть бронь.','Reservation — бронь.'],['My name is Anna.','Меня зовут Анна.','Так можно назвать имя, на которое оформлена бронь.'],['Could I check in, please?','Можно заселиться, пожалуйста?','Check in — зарегистрироваться при заселении.'],['Is breakfast included?','Завтрак включён?','Included — включён в стоимость.'],['What is the Wi-Fi password?','Какой пароль от Wi-Fi?','Password — пароль.'],['Could I have another towel?','Можно ещё одно полотенце?','Another — ещё один.']]},
+{id:'travel-cafe',name:'Кофе и что-нибудь вкусное',tip:'I would like… — я бы хотел. Could we have…? — можно нам…?',phrases:[['A table for two, please.','Столик на двоих, пожалуйста.','A table for two — столик для двух человек.'],['Could we see the menu?','Можно посмотреть меню?','Could we…? — вежливый вопрос.'],['I would like a coffee.','Я бы хотел чашку кофе.','A coffee означает порцию кофе.'],['Does this contain nuts?','Здесь есть орехи?','Contain — содержать. При аллергии уточняй состав у персонала.'],['Could we have the bill?','Можно нам счёт?','Bill — счёт в ресторане.'],['The food is delicious.','Еда очень вкусная.','Delicious — очень вкусный.']]},
+{id:'travel-transport',name:'Поезд, автобус и такси',tip:'A single ticket — билет в одну сторону. A return ticket — билет туда и обратно.',phrases:[['A single ticket, please.','Билет в одну сторону, пожалуйста.','Single — в одну сторону.'],['Which platform do I need?','Какая платформа мне нужна?','Which — какой из вариантов.'],['Does this bus go to the centre?','Этот автобус едет в центр?','Вопрос Present Simple: does + основная форма go.'],['How long does it take?','Сколько времени это занимает?','How long — вопрос о длительности.'],['Please stop here.','Остановитесь здесь, пожалуйста.','Stop here — остановитесь здесь.'],['Is this seat free?','Это место свободно?','Seat — место для сидения.']]},
+{id:'travel-shop',name:'Покупки в поездке',tip:'Try on — примерить одежду. Receipt — кассовый чек.',phrases:[['Can I try this on?','Можно это примерить?','Try this on — примерить это.'],['Do you have a larger size?','У вас есть размер побольше?','Larger — больше.'],['I am looking for a gift.','Я ищу подарок.','Look for — искать.'],['Can I have a receipt?','Можно чек?','Receipt — чек, буква p не произносится.'],['I will take this one.','Я возьму вот это.','Will здесь выражает решение в момент речи.'],['Where is the fitting room?','Где примерочная?','Fitting room — примерочная.']]},
+{id:'travel-help',name:'Когда нужна помощь',tip:'Could you…? — вежливая просьба. I need… — мне нужно.',phrases:[['Could you help me?','Не могли бы вы мне помочь?','Could you…? — вежливая форма просьбы.'],['I am lost.','Я заблудился.','Lost — потерявшийся.'],['Could you speak more slowly?','Не могли бы вы говорить медленнее?','More slowly — медленнее.'],['Please write it down.','Запишите это, пожалуйста.','Write down — записать.'],['I need a doctor.','Мне нужен врач.','Doctor — врач.'],['Where is the nearest pharmacy?','Где ближайшая аптека?','Nearest — ближайший, pharmacy — аптека.']]}
+];
+
+const ENGLISH_FREE_IDS=['hello','people','things','questions','family','food','routine','negative','city','shopping','now','plans'];
+const ENGLISH_ALL_IDS=[...ENGLISH_FREE_IDS,...ENGLISH_PREMIUM.map(l=>l.id)];
+function englishDb(){return createClient(Deno.env.get('SUPABASE_URL'),Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})}
+async function englishTelegram(method,body){const token=Deno.env.get('TELEGRAM_BOT_TOKEN')?.trim();const response=await fetch(`https://api.telegram.org/bot${token}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(7000)});const data=await response.json();if(!response.ok||!data.ok)throw Error('TELEGRAM_ERROR');return data.result}
+function cleanEnglishProgress(raw){const p=raw&&typeof raw==='object'?raw:{};const completed={},attempts={},daily={},mistakes={};for(const[id,value]of Object.entries(p.completed||{})){if(ENGLISH_ALL_IDS.includes(id)&&value&&Number(value.accuracy)>=60)completed[id]={accuracy:Math.min(100,Math.max(60,Math.round(Number(value.accuracy)))),date:typeof value.date==='string'?value.date.slice(0,10):''}}for(const[id,value]of Object.entries(p.attempts||{}))if(ENGLISH_ALL_IDS.includes(id))attempts[id]=Math.max(0,Math.min(10000,Math.round(Number(value)||0)));for(const[day,value]of Object.entries(p.daily||{}).slice(-5000))if(/^\d{4}-\d{2}-\d{2}$/.test(day))daily[day]=Math.max(0,Math.min(1000,Math.round(Number(value)||0)));const validWord=id=>typeof id==='string'&&ENGLISH_ALL_IDS.includes(id.split(':')[0])&&/:[0-5]$/.test(id);for(const[id,value]of Object.entries(p.mistakes||{}))if(validWord(id))mistakes[id]={wordId:id,count:Math.min(1000,Math.max(1,Number(value?.count)||1)),correctRun:Math.min(1,Math.max(0,Number(value?.correctRun)||0))};return{version:1,completed,attempts,daily,mistakes,seen:[...new Set((Array.isArray(p.seen)?p.seen:[]).filter(validWord))],dates:[...new Set((Array.isArray(p.dates)?p.dates:[]).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)))].slice(-5000),goal:[20,40,60].includes(p.goal)?p.goal:20,onboarded:!!p.onboarded,hearts:Math.min(5,Math.max(0,Number(p.hearts)||0)),heartAt:Math.min(Date.now(),Number(p.heartAt)||Date.now()),speech:p.speech!==false,sound:p.sound!==false,updatedAt:Math.min(Date.now(),Number(p.updatedAt)||0)}}
+function mergeEnglish(a,b){const result={...a,completed:{...a.completed},daily:{...a.daily},attempts:{...a.attempts}};for(const[id,value]of Object.entries(b.completed))if(!result.completed[id]||result.completed[id].accuracy<value.accuracy)result.completed[id]=value;for(const[day,value]of Object.entries(b.daily))result.daily[day]=Math.max(result.daily[day]||0,value);for(const[id,value]of Object.entries(b.attempts))result.attempts[id]=Math.max(result.attempts[id]||0,value);result.seen=[...new Set([...a.seen,...b.seen])];result.dates=[...new Set([...a.dates,...b.dates])].sort();if(b.updatedAt>a.updatedAt)for(const key of ['mistakes','goal','hearts','heartAt','speech','sound','onboarded','updatedAt'])result[key]=b[key];return result}
+async function englishAccess(db,userId){const r=await db.from('english_unlocks').select('pack_id').eq('telegram_user_id',userId).eq('pack_id','travel').maybeSingle();if(r.error)throw Error('DATABASE_NOT_READY');return !!r.data}
+async function handleEnglish(req){
+ if(req.headers.get('Origin')&&req.headers.get('Origin')!==WEB_ORIGIN)return apiJson({error:'ORIGIN_DENIED'},403);
+ if(req.method==='OPTIONS')return new Response(null,{status:204,headers:CORS});if(req.method!=='POST')return apiJson({error:'METHOD_NOT_ALLOWED'},405);
+ let body;try{body=await req.json()}catch{return apiJson({error:'INVALID_JSON'},400)}
+ const userId=await authenticateInitData(body?.initData,Deno.env.get('TELEGRAM_BOT_TOKEN')?.trim());if(!userId)return apiJson({error:'TELEGRAM_AUTH_REQUIRED'},401);
+ try{const db=englishDb();
+ if(body.action==='sync'){
+  const saved=await db.rpc('melo_english_sync',{buyer:userId,incoming:cleanEnglishProgress(body.progress)});if(saved.error||!saved.data)throw Error('db');
+  const progress=saved.data;
+  const unlocked=await englishAccess(db,userId);let ready=false;
+  if(Deno.env.get('MELO_ENGLISH_SALES_ENABLED')==='true'&&Deno.env.get('MELO_SUPPORT_CONTACT')){try{const info=await englishTelegram('getWebhookInfo',{});ready=!!info.allowed_updates?.includes('pre_checkout_query')}catch{}}
+  return apiJson({progress,shop:{ready,unlocked,isAdmin:String(userId)===Deno.env.get('MELO_ADMIN_USER_ID'),words:unlocked?ENGLISH_PREMIUM.flatMap(l=>l.phrases.map((p,i)=>({id:l.id+':'+i,lessonId:l.id,en:p[0],ru:p[1],explanation:p[2]}))).filter(w=>progress.seen.includes(w.id)):[],support:Deno.env.get('MELO_SUPPORT_CONTACT')||'',lessons:unlocked?ENGLISH_PREMIUM.map(l=>({id:l.id,name:l.name})):[]}});
+ }
+ if(body.action==='lesson'){
+  const lesson=ENGLISH_PREMIUM.find(l=>l.id===body.lessonId);if(!lesson)return apiJson({error:'LESSON_NOT_FOUND'},404);if(!await englishAccess(db,userId))return apiJson({error:'PURCHASE_REQUIRED'},403);return apiJson({lesson});
+ }
+ if(body.action==='invoice'){
+  if(body.packId!=='travel'||Deno.env.get('MELO_ENGLISH_SALES_ENABLED')!=='true'||!Deno.env.get('MELO_SUPPORT_CONTACT'))return apiJson({error:'SALES_DISABLED'},409);
+  const info=await englishTelegram('getWebhookInfo',{});if(!info.allowed_updates?.includes('pre_checkout_query'))return apiJson({error:'PAYMENTS_NOT_CONFIGURED'},409);
+  if(await englishAccess(db,userId))return apiJson({error:'ALREADY_PURCHASED'},409);
+  const order=await db.from('english_orders').insert({telegram_user_id:userId,pack_id:'travel',amount:199}).select('id').single();if(order.error)throw Error('db');
+  const link=await englishTelegram('createInvoiceLink',{title:'Melo English: В поездке — как дома',description:'6 уроков A1–A2, 36 фраз с заданиями. Разовая покупка, доступ без срока действия. Поддержка: '+Deno.env.get('MELO_SUPPORT_CONTACT'),payload:'meloeng:'+order.data.id,currency:'XTR',provider_token:'',prices:[{label:'Набор «В поездке — как дома»',amount:199}]});return apiJson({url:link});
+ }
+ if(body.action==='setup_webhook'){
+  if(String(userId)!==Deno.env.get('MELO_ADMIN_USER_ID'))return apiJson({error:'FORBIDDEN'},403);
+  const secret=Deno.env.get('TELEGRAM_WEBHOOK_SECRET');if(!secret)throw Error('config');
+  await englishTelegram('setWebhook',{url:Deno.env.get('SUPABASE_URL')+'/functions/v1/melospace-api',secret_token:secret,allowed_updates:['message','pre_checkout_query']});return apiJson({ok:true});
+ }
+ return apiJson({error:'UNKNOWN_ACTION'},400);
+ }catch{return apiJson({error:'ENGLISH_UNAVAILABLE'},503)}
+}
+async function englishWebhook(update){
+ const pre=update.pre_checkout_query;
+ if(pre?.invoice_payload?.startsWith('meloeng:')){
+  try{const id=pre.invoice_payload.slice(8);if(!/^[0-9a-f-]{36}$/i.test(id))throw Error();const db=englishDb();const r=await db.from('english_orders').select('id,telegram_user_id,amount,status').eq('id',id).maybeSingle();const valid=!r.error&&r.data&&r.data.status==='pending'&&r.data.telegram_user_id===pre.from.id&&pre.currency==='XTR'&&pre.total_amount===r.data.amount&&!await englishAccess(db,pre.from.id)&&Deno.env.get('MELO_ENGLISH_SALES_ENABLED')==='true';return Response.json({method:'answerPreCheckoutQuery',pre_checkout_query_id:pre.id,ok:!!valid,...(!valid?{error_message:'Покупка недоступна или набор уже открыт. Stars не списаны.'}:{})})}catch{return Response.json({method:'answerPreCheckoutQuery',pre_checkout_query_id:pre.id,ok:false,error_message:'Не удалось проверить заказ. Попробуй позже.'})}
+ }
+ const m=update.message,payment=m?.successful_payment,refund=m?.refunded_payment;
+ if(payment?.invoice_payload?.startsWith('meloeng:')){
+  if(m.chat?.type!=='private'||m.chat.id!==m.from?.id||payment.currency!=='XTR'||payment.total_amount!==199)return new Response('Invalid payment',{status:400});
+  const id=payment.invoice_payload.slice(8);if(!/^[0-9a-f-]{36}$/i.test(id))return new Response('Invalid order',{status:400});
+  try{const r=await englishDb().rpc('melo_english_fulfill',{order_uuid:id,buyer:m.from.id,charge:payment.telegram_payment_charge_id,stars:payment.total_amount});if(r.error||!r.data)throw Error();return reply(m.chat.id,'Спасибо! Набор «В поездке — как дома» открыт ✓\nВернись в Melo English → Новые истории → Обновить покупки.\nНомер заказа: '+id)}catch{return new Response('Payment processing pending',{status:503})}
+ }
+ if(refund?.invoice_payload?.startsWith('meloeng:')){try{const r=await englishDb().rpc('melo_english_refund',{charge:refund.telegram_payment_charge_id});if(r.error)throw Error();return Response.json({ok:true})}catch{return new Response('Refund processing pending',{status:503})}}
+ if(m?.chat?.type==='private'&&/^\/paysupport(?:@\w+)?(?:\s|$)/.test(m.text||''))return reply(m.chat.id,'Поддержка покупок Melo English: '+(Deno.env.get('MELO_SUPPORT_CONTACT')||'контакт владельца ещё не настроен. Продажи отключены.')+'\nУкажи номер заказа из подтверждения оплаты. Токены, пароли и банковские данные не отправляй.');
+ if(m?.chat?.type==='private'&&/^\/refund\s+[0-9a-f-]{36}$/i.test(m.text||'')){
+  if(String(m.from?.id)!==Deno.env.get('MELO_ADMIN_USER_ID'))return reply(m.chat.id,'Команда доступна только администратору.');
+  try{const id=m.text.split(/\s+/)[1],db=englishDb();const r=await db.from('english_orders').select('telegram_user_id,charge_id,status').eq('id',id).maybeSingle();if(r.error||!r.data||r.data.status!=='paid')return reply(m.chat.id,'Оплаченный заказ не найден.');await englishTelegram('refundStarPayment',{user_id:r.data.telegram_user_id,telegram_payment_charge_id:r.data.charge_id});const saved=await db.rpc('melo_english_refund',{charge:r.data.charge_id});if(saved.error)throw Error();return reply(m.chat.id,'Возврат выполнен. Доступ по этому заказу закрыт.')}catch{return reply(m.chat.id,'Возврат не подтверждён. Проверь журнал Stars и статус заказа перед повтором.')}
+ }
+ return null;
+}
+
 async function handleRequest(req) {
+  if (new URL(req.url).pathname.endsWith("/english")) return handleEnglish(req);
   if (new URL(req.url).pathname.endsWith("/social")) return handleSocial(req);
   if (new URL(req.url).pathname.endsWith("/catalog")) return handleCatalog(req);
   if (new URL(req.url).pathname.endsWith("/library")) return handleLibrary(req);
   if (req.method === 'GET') {
-    return Response.json({ service: 'MeloSpace', status: 'ok', version: 7 });
+    return Response.json({ service: 'MeloSpace', status: 'ok', version: 8 });
   }
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
@@ -278,6 +346,8 @@ async function handleRequest(req) {
   let update;
   try { update = await req.json(); }
   catch { return new Response('Invalid JSON', { status: 400 }); }
+  const learningResponse = await englishWebhook(update);
+  if (learningResponse) return learningResponse;
   const message = update?.message;
   if (!message || message.chat?.type !== 'private' || message.from?.is_bot) {
     return Response.json({ ok: true });
